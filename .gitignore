@@ -1,0 +1,9 @@
+release/
+test-bin/
+bin/
+obj/
+State/
+settings.json
+recovery.json
+*.tmp
+.vs/
