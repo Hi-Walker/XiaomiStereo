@@ -45,9 +45,10 @@ internal static class StereoProgram {
             try {
                 using(var worker=new Coordinator(directory))
                 using(var tray=new StereoTray(worker,activation)) {
+                    int sessionEnded=0;
                     EventHandler exit=(s,e)=>worker.Dispose();
                     // SessionEnding can be cancelled. Release only after Windows confirms the session ended.
-                    SessionEndedEventHandler ended=(s,e)=>worker.Dispose();
+                    SessionEndedEventHandler ended=(s,e)=>{Interlocked.Exchange(ref sessionEnded,1);worker.Dispose();};
                     PowerModeChangedEventHandler power=(s,e)=>{
                         if(e.Mode==PowerModes.Suspend || e.Mode==PowerModes.Resume)
                             worker.SleepChanged(e.Mode==PowerModes.Suspend);
@@ -58,6 +59,9 @@ internal static class StereoProgram {
                     try {
                         if(!launch.Startup)tray.OpenControlPanel();
                         Application.Run();
+                        worker.Dispose();
+                        if(Volatile.Read(ref sessionEnded)==0 && worker.ShutdownError!="")
+                            MessageBox.Show(worker.ShutdownError,"小米立体声 · 退出提示",MessageBoxButtons.OK,MessageBoxIcon.Warning);
                     }
                     finally {
                         SystemEvents.PowerModeChanged-=power;

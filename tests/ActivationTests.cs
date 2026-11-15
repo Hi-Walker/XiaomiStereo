@@ -200,6 +200,10 @@ internal static class ActivationTests {
                     StereoProgram.ActivateExisting(StereoProgram.ParseArguments(args.Length==3?new[]{args[2]}:new string[0]),sender);
                 return 0;
             }
+            if(args.Length==1 && args[0]=="--headless") {
+                TestArgumentsAndSignals();TestBadDefaultDoesNotBlockActivation();
+                Console.WriteLine("SKIP native window/resource tests (--headless); no window restoration claim");return 0;
+            }
             Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);
             TestHiddenStartup();TestArgumentsAndSignals();TestBadDefaultDoesNotBlockActivation();TestWindowsAndResources();return 0;
         }catch(Exception e){Console.WriteLine(e.GetType().Name+": "+e.Message);return 1;}

@@ -83,6 +83,7 @@ internal sealed class Coordinator : IDisposable {
     internal readonly BoundedDiagnostics Diag=new BoundedDiagnostics();
     volatile bool quitting;
     bool joined;
+    string shutdownError="";
     int? enableCommand;
     SettingsPatch settingsCommand;
     long requestedSettingsRevision, completedSettingsRevision;
@@ -110,6 +111,7 @@ internal sealed class Coordinator : IDisposable {
         owner.Start();
     }
     internal View Current {get {lock(gate) return snapshot;}}
+    internal string ShutdownError {get {lock(gate)return shutdownError;}}
     internal void Enable(bool on) {lock(gate){if(quitting)return;enableCommand=on?1:0;wake.Set();}}
     internal void Resync() {lock(gate){if(quitting)return;resyncCommand=true;wake.Set();}}
     // The UI submits only the fields the user changed. One pending patch retains
@@ -248,10 +250,47 @@ internal sealed class Coordinator : IDisposable {
                 wake.WaitOne((int)Math.Max(1,due-now));
             }
         } finally {
-            try { CloseAudio(); } catch(Exception e){RecordError(e);}
+            lock(gate){quitting=true;}
+            blocked=true; // Final snapshots must not read a stopped/disposed bridge.
+            // Acceptance is sealed by Dispose. Persist the final accepted state
+            // without invoking any audio/routing setup, even if a driver call
+            // was still in flight when the user asked to exit.
+            try {SaveFinalSettings();} catch(Exception e){ExitFailure("退出时未能保存最后设置",e);}
+            try { CloseAudio(); } catch(Exception e){ExitFailure("退出时未能完成普通输出恢复",e);}
             if(registered)try {host.Unregister(notice);}catch(Exception e){RecordError(e);}
             if(host!=null)try {host.Dispose();}catch(Exception e){RecordError(e);}
+            Publish();
         }
+    }
+    void SaveFinalSettings() {
+        SettingsPatch patch;int? command;
+        lock(gate){patch=settingsCommand;settingsCommand=null;command=enableCommand;enableCommand=null;}
+        if(command.HasValue)wanted=command.Value==1;
+        try {
+            if(!hasConfig) {
+                if(patch!=null || command.HasValue)throw new ConfigurationException("设置文件无效，未覆盖原文件。");
+                return;
+            }
+            if(patch==null && config.Enabled==wanted)return;
+            var edit=patch==null?config.Copy():patch.Merge(config);
+            edit.Enabled=wanted;edit.Validate();
+            store.Save(edit);config=edit;
+        } finally {
+            if(patch!=null)completedSettingsRevision=patch.Revision;
+        }
+    }
+    void ExitFailure(string message,Exception error) {
+        RecordError(error);
+        string explanation=BoundedDiagnostics.Limit(message+"。"+UserMessage(error),320);
+        lock(gate) {
+            // Saving and restoring the old output can fail independently. Keep
+            // both failure labels in one bounded message, rather than hiding
+            // an unsaved request behind the later restoration error.
+            if(shutdownError!="")explanation=BoundedDiagnostics.Limit(shutdownError,150)+"\r\n"+
+                BoundedDiagnostics.Limit(explanation,150);
+            shutdownError=explanation;
+        }
+        state="需要处理";detail=explanation;lastError=explanation;
     }
     void BeginIntent() {
         if(config.ManageDefaults) {host.SnapshotIntent();intent=true;}
@@ -270,6 +309,7 @@ internal sealed class Coordinator : IDisposable {
         state="已暂停";detail=reason;Diag.Note(generation,reason,0);nextPublish=0;
     }
     void Iterate() {
+        if(quitting)return;
         long now=clock.ElapsedMilliseconds;
         bool checkHealth=now>=nextHealth;
         if(checkHealth)nextHealth=now+HealthPeriod;
@@ -279,6 +319,14 @@ internal sealed class Coordinator : IDisposable {
             sync=resyncCommand;resyncCommand=false;list=listCommand;
         }
         int power=Interlocked.Exchange(ref sleepFlag,0);
+        // Commit facts and explicit intent before storage, routing or device
+        // calls can throw. A consumed Resume must never leave sleeping=true.
+        if(command.HasValue)wanted=command.Value==1;
+        if(power!=0) {
+            sleeping=power==1;
+            if(!sleeping){nextTry=now+200;resumeRequired=true;}
+            nextPublish=0;
+        }
         if(Interlocked.Exchange(ref topologyFlag,0)!=0 && nextTopologyCheck==0) nextTopologyCheck=now+200;
         bool topo=nextTopologyCheck!=0 && now>=nextTopologyCheck;
         if(topo)nextTopologyCheck=0;
@@ -292,6 +340,7 @@ internal sealed class Coordinator : IDisposable {
         }
         // Do not take this slot before the preceding pause completes. A failure
         // there must leave accepted settings available for the next iteration.
+        if(quitting)return;
         bool edited=ApplyPendingSettings();
         if(command==1) {
             if(!hasConfig) {config=store.Load();hasConfig=true;}
@@ -310,12 +359,10 @@ internal sealed class Coordinator : IDisposable {
             choiceSerial=unchecked(choiceSerial+1);nextPublish=0;
         }
         if(power!=0) {
-            sleeping=power==1;
             if(sleeping) { CloseAudio(); if(wanted && !blocked)state="等待系统唤醒"; }
             else {
                 // Suspend/resume messages may collapse into a single resume notification.
                 if(bridge!=null)CloseAudio();
-                nextTry=now+200;resumeRequired=true;
             }
             nextPublish=0;
         }
@@ -325,14 +372,14 @@ internal sealed class Coordinator : IDisposable {
             CloseAudio();
             if(!wanted) {host.ForgetIntent();intent=false;state="已暂停";detail="已恢复普通输出";nextPublish=0;}
         }
-        if(wanted && !blocked && !sleeping && !pendingRestore) {
+        if(!quitting && wanted && !blocked && !sleeping && !pendingRestore) {
             if(intent && (changed || checkHealth) && host.ExternalChange()) {
                 Pause("默认输出已更改，已停止自动接管");
             } else {
                 if(bridge!=null && (topo || resumeRequired || checkHealth)) {
-                    resumeRequired=false;
                     if(!host.DevicesActive())
                         throw new DeviceUnavailableException("配置的播放设备已离线");
+                    resumeRequired=false;
                 }
                 if(bridge==null && now>=nextTry) StartAudio();
                 if(bridge!=null && sync) bridge.Resync();
@@ -347,7 +394,7 @@ internal sealed class Coordinator : IDisposable {
     }
     bool ApplyPendingSettings() {
         SettingsPatch patch;
-        lock(gate){patch=settingsCommand;settingsCommand=null;}
+        lock(gate){if(quitting)return false;patch=settingsCommand;settingsCommand=null;}
         if(patch==null)return false;
         try {
             if(!hasConfig)throw new ConfigurationException("请先修复 settings.json 再重新启用");
@@ -386,15 +433,18 @@ internal sealed class Coordinator : IDisposable {
         }
         store.Save(edit);config=edit;
         if(rebind && wanted){OpenSystem();if(InspectPrevious())BeginIntent();}
+        if(rebind && !wanted && !pendingRestore){state="已暂停";detail="已恢复普通输出";}
         if(bridge!=null)bridge.SetMix(config.SwapChannels,config.BalanceDb);
         nextPublish=0;
     }
     void StartAudio() {
+        if(quitting)return;
         lastAttempt=clock.ElapsedMilliseconds;
         OpenSystem();
         if(config.ManageDefaults && !intent) {if(!InspectPrevious())return;BeginIntent();}
         var bound=config.Copy();
         if(host.Bind(bound)){store.Save(bound);config=bound;}
+        if(quitting)return;
         bridge=host.OpenBridge(config);
         bool cancel;
         lock(gate){cancel=quitting || enableCommand==0 || Volatile.Read(ref sleepFlag)==1;}
@@ -470,7 +520,10 @@ internal sealed class Coordinator : IDisposable {
     }
     public void Dispose() {
         lock(gate){if(joined)return;quitting=true;wake.Set();}
-        if(!owner.Join(3500))return; // OS cleanup/journal on restart if a driver blocks.
+        if(!owner.Join(3500)) {
+            lock(gate){if(shutdownError=="")shutdownError="退出等待超时，尚未确认最后设置已保存。请等待设备调用结束后再关闭；异常退出仍需下次启动恢复。";}
+            return;
+        }
         lock(gate){if(!joined){joined=true;wake.Dispose();}}
     }
 }

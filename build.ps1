@@ -45,7 +45,7 @@ if ($Tests -or $CompileTestsOnly) {
         $name = $test.BaseName
         & "$compiler\tools\csc.exe" @arguments /target:exe "/main:$name" "/out:$testOut\$name.exe" @source $test.FullName
         if ($LASTEXITCODE) { throw "Test compilation failed: $name" }
-        if ($CompileTestsOnly -or $name -eq 'HardwareAcceptance') { continue } # Hardware tests require an explicit test session.
+        if ($CompileTestsOnly -or $name -in @('HardwareAcceptance','HardwareSoak')) { continue } # Hardware tests require an explicit test session.
         & "$testOut\$name.exe"
         if ($LASTEXITCODE) { throw "Test failed: $name" }
     }

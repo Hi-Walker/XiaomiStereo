@@ -1,4 +1,7 @@
-# 小米立体声 / Xiaomi Stereo 2.0.3
+# 小米立体声 / Xiaomi Stereo 2.0.4
+
+> **本次说明补充未改动 2.0.4 程序；测试构建新增的 30 分钟受控复测通过既定数字音频检查，未复现此前异常。前两轮失败与未归因范围仍保留。公开 EXE 本身尚未上硬件；下载文件以 GitHub Release 实际附件为准。**
+> **This validation addendum does not change the 2.0.4 application. A new controlled 30-minute run of the tested build passed its existing digital audio checks without reproducing the earlier anomalies. Both earlier failed runs and attribution limits remain documented. The public EXE itself has not been installed on hardware; available downloads are determined by the actual GitHub Release attachments.**
 
 通过 Windows 电脑，将两只分别以 USB 连接的小米音箱作为左右声道使用。提供音量联动、左右交换、声道平衡和播放设备恢复功能。当前软件界面为中文。
 
@@ -10,10 +13,12 @@
 
 ## 下载
 
-- [下载 Windows x64 运行包](https://github.com/Hi-Walker/XiaomiStereo/releases/download/v2.0.3/XiaomiStereo-2.0.3-win-x64.zip)
-- [查看发行版、源码包和校验值](https://github.com/Hi-Walker/XiaomiStereo/releases/tag/v2.0.3)
+以下为版本下载地址，具体可用文件以 GitHub Release 实际附件为准。
 
-普通用户下载 `XiaomiStereo-2.0.3-win-x64.zip`，解压整个文件夹后运行 `小米立体声.exe`。`source.zip` 是源码，不是安装程序。
+- [下载 Windows x64 运行包](https://github.com/Hi-Walker/XiaomiStereo/releases/download/v2.0.4/XiaomiStereo-2.0.4-win-x64.zip)
+- [查看发行版、源码包和校验值](https://github.com/Hi-Walker/XiaomiStereo/releases/tag/v2.0.4)
+
+普通用户下载 `XiaomiStereo-2.0.4-win-x64.zip`，解压整个文件夹后运行 `小米立体声.exe`。`source.zip` 是源码，不是安装程序。
 
 ## 使用条件
 
@@ -31,12 +36,12 @@
 5. 保存设置并启用立体声。开启自动切换时，程序在链路就绪后管理 Windows 的普通/多媒体默认输出；手动模式下，请在 Windows 或播放应用中选择所配置的虚拟播放设备。
 6. 先以较低音量播放测试内容，确认左右方向。可在面板中交换左右、调整平衡和重新同步。
 
-## 2.0.3 更新
+## 2.0.4 更新
 
-- 修复设备设置、声道平衡与左右交换操作互相覆盖的问题。
-- 修复旧状态刷新撤销刚提交的操作，以及关闭重开面板时丢失待确认操作的问题。
-- 修复设置保存失败、暂停恢复失败及重复保存等边界情况。
-- 音频处理、音量曲线和双向音量联动保持不变。
+- 正常退出前保存已经接受的设置及最后的启用/暂停意图；退出过程中不重新启动音频链路。
+- 保存、恢复普通输出失败或退出等待超时时给出提示，避免把未完成的清理显示为成功。
+- 先记录系统挂起/恢复状态，再执行可能失败的保存和设备操作，避免恢复通知因同轮异常被丢失。
+- 音频处理、缓冲控制、音量曲线和双向音量联动保持不变。
 
 ## 日常使用
 
@@ -56,7 +61,9 @@
 
 ## 已测试范围与限制
 
-本版本通过七类软件回归测试，包含 11 组设置场景和 60 轮窗口恢复与释放检查。本轮未新增实机听音或声学验收；尚未完成长时间真实连续播放、全部睡眠唤醒场景或声学同步测量。详情见 [验证说明](docs/VALIDATION.md)。
+最新补充：2026-11-15 的 30 分钟受控复测在无交互操作、Edge 与 Wallpaper Engine 已关闭并隔离其他音频会话的条件下通过（退出码 0）。测试器耗时 1,802.477 秒，实际检查播放 1,797.107 秒，含 1 次计划暂停/恢复；源端左右各 179,713 个、输出左右各 179,714 个 10 ms 窗口，不合格数均为 0，并复核了源端 RMS 与峰值。32 次正式进程采样中，私有内存 38.629～38.891 MiB，句柄 454～475、线程 11～14；整机口径平均 CPU 0.08089%，最大区间平均 0.20813%（非瞬时峰值）。19 项环境核对和 4 项会话恢复全部通过。程序、版本和音频实现未改；这是测试构建的数字回环结果，不能替代公开 EXE 或声学验收，也不能把下面两轮旧失败改写为通过。
+
+公开候选独立通过七个软件测试、Activation 的 --headless 子集及虚拟时间 7,200 秒的音频仿真（进程墙钟 50.732 秒，非实机两小时）。测试构建另通过约 63 秒双输出数字短测、真实音量切换与恢复及 60 轮原生窗口恢复。首轮实机长测约 19.8 分钟中止，保留未归因异常，不计为通过；第二轮 90 分钟主测量阶段结束，含 5 次计划暂停、实际播放 89 分 44.505 秒，严格纯音检查未通过（左右 6,685/7,420 个不合格窗口）。额外输入只在一段较晚观察中明确关联到 Edge，不能解释全部异常。92 次采样的私有内存为 44.676～44.879 MiB，句柄 459～481、线程 11～14；13 项结束核对及 5 个会话恢复检查全部通过。公开 EXE 本身尚未上硬件；真实睡眠唤醒和声学同步仍未验收。详情见 [验证说明](docs/VALIDATION.md)。
 
 本软件不等同于小米官方无线组网功能，也不保证所有设备兼容或两箱声学延迟完全一致。
 
@@ -65,10 +72,10 @@
 在 Windows x64 和 PowerShell 下，于源码目录执行：
 
 ```powershell
-.\build.ps1 -Tests
+.\build.ps1
 ```
 
-如需在独立测试桌面运行软件测试，可先用 `-CompileTestsOnly` 编译，再按 [验证说明](docs/VALIDATION.md) 运行测试工具。
+如需复现本轮不显示窗口的软件测试，先用 `-CompileTestsOnly` 编译，再按 [验证说明](docs/VALIDATION.md) 运行。完整原生窗口测试需要可创建独立桌面的交互式 Windows 会话；不要在独立桌面创建失败时自动退回当前桌面。
 
 首次构建下载固定版本的 NuGet 构建工具并核对 SHA-256；默认产物在 `release`。普通测试主要使用内存音频、模拟路由和隔离进程。`HardwareAcceptance.exe` 不会默认运行，只适合具备相应硬件且了解测试行为的开发者。
 
@@ -84,7 +91,9 @@ Xiaomi Stereo sends the left and right channels from a Windows virtual playback 
 
 ### Download and requirements
 
-Download [XiaomiStereo-2.0.3-win-x64.zip](https://github.com/Hi-Walker/XiaomiStereo/releases/download/v2.0.3/XiaomiStereo-2.0.3-win-x64.zip), extract all files and run `小米立体声.exe`. The source archive is for development. Checksums and source are available on the [release page](https://github.com/Hi-Walker/XiaomiStereo/releases/tag/v2.0.3).
+The links below identify this version; use the actual GitHub Release attachments to determine available downloads.
+
+Download [XiaomiStereo-2.0.4-win-x64.zip](https://github.com/Hi-Walker/XiaomiStereo/releases/download/v2.0.4/XiaomiStereo-2.0.4-win-x64.zip), extract all files and run `小米立体声.exe`. The source archive is for development. Checksums and source are available on the [release page](https://github.com/Hi-Walker/XiaomiStereo/releases/tag/v2.0.4).
 
 - Windows 10 version 1703 or newer, x64, with .NET Framework 4.8 or later. Hardware checks were performed on Windows 11.
 - Two speakers that Windows can access as separate USB playback devices. Testing used two Xiaomi Smart Speaker Pro units; compatibility with every model or firmware is not established.
@@ -100,12 +109,12 @@ Download [XiaomiStereo-2.0.3-win-x64.zip](https://github.com/Hi-Walker/XiaomiSte
 5. Save and enable stereo. Automatic mode takes over the normal/multimedia default outputs after the audio path is ready. In manual mode, select the configured virtual device in Windows or in the playback application.
 6. Start at a low volume and verify the channels. Use the panel to swap channels, adjust balance or resynchronize.
 
-### Changes in 2.0.3
+### Changes in 2.0.4
 
-- Fixes device settings, balance changes and channel swaps overwriting one another.
-- Prevents stale refreshes from undoing pending edits and preserves pending edits when the panel is closed and reopened.
-- Fixes edge cases involving failed saves, failed restoration while pausing and repeated saves.
-- Audio processing, the volume curve and bidirectional volume linking are unchanged.
+- Saves accepted settings and the latest enable/pause intent before normal exit, without restarting audio during shutdown.
+- Reports save/restoration failures and shutdown timeouts instead of treating incomplete cleanup as success.
+- Records suspend/resume state before storage and device operations that may fail, preventing a consumed resume notification from leaving the coordinator asleep.
+- Audio processing, buffer control, the volume curve and bidirectional volume linking are unchanged.
 
 ### Everyday operation
 
@@ -123,8 +132,10 @@ Settings are stored in the current Windows user's `%LOCALAPPDATA%\XiaomiStereo` 
 
 ### Validation, development and notices
 
-This release passed seven software test suites, including 11 settings scenarios and 60 window recovery/disposal cycles. No new hardware listening or acoustic acceptance tests were performed for this release. Long physical playback runs, all suspend/resume conditions and acoustic synchronization measurements remain unverified. See [VALIDATION.md](docs/VALIDATION.md) for details.
+Latest supplemental result: on 2026-11-15, a controlled 30-minute run passed with exit code 0 while there was no interactive input, Edge and Wallpaper Engine were already closed, and other audio sessions were isolated. Harness elapsed time was 1,802.477 seconds, with 1,797.107 seconds of checked playback and one planned pause/resume. Each source channel had 179,713 ten-millisecond windows and each output had 179,714, all with zero bad windows; source RMS and peak were also checked. Across 32 production-process samples, private memory was 38.629–38.891 MiB, handles 454–475 and threads 11–14; whole-machine mean CPU was 0.08089%, and the largest interval average was 0.20813% (not an instantaneous peak). All 19 environment checks and 4 session restorations passed. The application, version and audio implementation are unchanged. This digital loopback result from the tested build is not public-binary or acoustic acceptance and does not convert either earlier failed run below into a pass.
 
-Build on Windows x64 with PowerShell using `./build.ps1 -Tests`. To run software tests on a separate desktop, first compile with `-CompileTestsOnly`, then follow [VALIDATION.md](docs/VALIDATION.md). The initial build downloads pinned NuGet build tools and verifies SHA-256; output goes to `release`. The default tests use in-memory audio, simulated routing and isolated processes. Hardware acceptance tests are not run automatically.
+The public candidate independently passed seven software suites, Activation's --headless subset and a 7,200-second virtual-time audio simulation (50.732 seconds of process wall time, not two hours on hardware). The tested build separately passed an approximately 63-second two-output digital check, real volume transitions/restoration and 60 native-window recovery cycles. The first hardware run was stopped after approximately 19.8 minutes with unclassified anomalies retained and is not counted as passed. The second 90-minute measurement phase completed with 5 planned pauses and 89 minutes 44.505 seconds of measured playback; the strict pure-tone check did not pass (6,685/7,420 bad left/right windows). Extra input was directly associated with Edge only during a later observation segment, not all anomalies. Across 92 samples, private memory was 44.676–44.879 MiB, handles 459–481 and threads 11–14; all 13 post-run checks and 5 session restorations passed. The public EXE itself has not been installed on hardware. Real suspend/resume and acoustic synchronization remain unverified. See [VALIDATION.md](docs/VALIDATION.md).
+
+Build on Windows x64 with PowerShell using `./build.ps1`. To reproduce this run without showing windows, compile with `-CompileTestsOnly` and follow [VALIDATION.md](docs/VALIDATION.md). Full native-window tests require an interactive Windows session that permits a separate desktop; do not silently fall back to the visible desktop if desktop creation fails. The initial build downloads pinned NuGet build tools and verifies SHA-256; output goes to `release`. The default tests use in-memory audio, simulated routing and isolated processes. Hardware acceptance tests are not run automatically.
 
 NAudio's license is in [licenses/NAudio.txt](licenses/NAudio.txt). No project-wide open-source license has been added; publishing the source is not an unrestricted redistribution grant. Xiaomi names and marks belong to their respective owners. This tool is not Xiaomi's native wireless grouping system and does not guarantee universal compatibility or identical acoustic latency.
