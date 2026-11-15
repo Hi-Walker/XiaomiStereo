@@ -1,4 +1,4 @@
-# 小米立体声 / Xiaomi Stereo 2.0.2
+# 小米立体声 / Xiaomi Stereo 2.0.3
 
 通过 Windows 电脑，将两只分别以 USB 连接的小米音箱作为左右声道使用。提供音量联动、左右交换、声道平衡和播放设备恢复功能。当前软件界面为中文。
 
@@ -10,10 +10,10 @@
 
 ## 下载
 
-- [下载 Windows x64 运行包](https://github.com/Hi-Walker/XiaomiStereo/releases/download/v2.0.2/XiaomiStereo-2.0.2-win-x64.zip)
-- [查看发行版、源码包和校验值](https://github.com/Hi-Walker/XiaomiStereo/releases/tag/v2.0.2)
+- [下载 Windows x64 运行包](https://github.com/Hi-Walker/XiaomiStereo/releases/download/v2.0.3/XiaomiStereo-2.0.3-win-x64.zip)
+- [查看发行版、源码包和校验值](https://github.com/Hi-Walker/XiaomiStereo/releases/tag/v2.0.3)
 
-普通用户下载 `XiaomiStereo-2.0.2-win-x64.zip`，解压整个文件夹后运行 `小米立体声.exe`。`source.zip` 是源码，不是安装程序。
+普通用户下载 `XiaomiStereo-2.0.3-win-x64.zip`，解压整个文件夹后运行 `小米立体声.exe`。`source.zip` 是源码，不是安装程序。
 
 ## 使用条件
 
@@ -30,6 +30,13 @@
 4. 打开面板中的“设备设置”，手动选择电脑音频入口（虚拟播放设备）、左音箱、右音箱和备用普通扬声器。前三项必须是三个不同的设备。首次出现等待设备提示时，在此选择自己的设备，不必修改音箱名称。
 5. 保存设置并启用立体声。开启自动切换时，程序在链路就绪后管理 Windows 的普通/多媒体默认输出；手动模式下，请在 Windows 或播放应用中选择所配置的虚拟播放设备。
 6. 先以较低音量播放测试内容，确认左右方向。可在面板中交换左右、调整平衡和重新同步。
+
+## 2.0.3 更新
+
+- 修复设备设置、声道平衡与左右交换操作互相覆盖的问题。
+- 修复旧状态刷新撤销刚提交的操作，以及关闭重开面板时丢失待确认操作的问题。
+- 修复设置保存失败、暂停恢复失败及重复保存等边界情况。
+- 音频处理、音量曲线和双向音量联动保持不变。
 
 ## 日常使用
 
@@ -49,7 +56,7 @@
 
 ## 已测试范围与限制
 
-本版本已通过软件回归测试。尚未完成长时间真实连续播放、全部睡眠唤醒场景或声学同步测量。详情见 [验证说明](docs/VALIDATION.md)。
+本版本通过七类软件回归测试，包含 11 组设置场景和 60 轮窗口恢复与释放检查。本轮未新增实机听音或声学验收；尚未完成长时间真实连续播放、全部睡眠唤醒场景或声学同步测量。详情见 [验证说明](docs/VALIDATION.md)。
 
 本软件不等同于小米官方无线组网功能，也不保证所有设备兼容或两箱声学延迟完全一致。
 
@@ -60,6 +67,8 @@
 ```powershell
 .\build.ps1 -Tests
 ```
+
+如需在独立测试桌面运行软件测试，可先用 `-CompileTestsOnly` 编译，再按 [验证说明](docs/VALIDATION.md) 运行测试工具。
 
 首次构建下载固定版本的 NuGet 构建工具并核对 SHA-256；默认产物在 `release`。普通测试主要使用内存音频、模拟路由和隔离进程。`HardwareAcceptance.exe` 不会默认运行，只适合具备相应硬件且了解测试行为的开发者。
 
@@ -75,7 +84,7 @@ Xiaomi Stereo sends the left and right channels from a Windows virtual playback 
 
 ### Download and requirements
 
-Download [XiaomiStereo-2.0.2-win-x64.zip](https://github.com/Hi-Walker/XiaomiStereo/releases/download/v2.0.2/XiaomiStereo-2.0.2-win-x64.zip), extract all files and run `小米立体声.exe`. The source archive is for development. Checksums and source are available on the [release page](https://github.com/Hi-Walker/XiaomiStereo/releases/tag/v2.0.2).
+Download [XiaomiStereo-2.0.3-win-x64.zip](https://github.com/Hi-Walker/XiaomiStereo/releases/download/v2.0.3/XiaomiStereo-2.0.3-win-x64.zip), extract all files and run `小米立体声.exe`. The source archive is for development. Checksums and source are available on the [release page](https://github.com/Hi-Walker/XiaomiStereo/releases/tag/v2.0.3).
 
 - Windows 10 version 1703 or newer, x64, with .NET Framework 4.8 or later. Hardware checks were performed on Windows 11.
 - Two speakers that Windows can access as separate USB playback devices. Testing used two Xiaomi Smart Speaker Pro units; compatibility with every model or firmware is not established.
@@ -90,6 +99,13 @@ Download [XiaomiStereo-2.0.2-win-x64.zip](https://github.com/Hi-Walker/XiaomiSte
 4. Open **设备设置 (Device settings)** and manually select the virtual audio source, left speaker, right speaker and fallback normal output. The source and two speaker outputs must be distinct. If it initially waits for devices, select your own devices here; do not rename your speakers.
 5. Save and enable stereo. Automatic mode takes over the normal/multimedia default outputs after the audio path is ready. In manual mode, select the configured virtual device in Windows or in the playback application.
 6. Start at a low volume and verify the channels. Use the panel to swap channels, adjust balance or resynchronize.
+
+### Changes in 2.0.3
+
+- Fixes device settings, balance changes and channel swaps overwriting one another.
+- Prevents stale refreshes from undoing pending edits and preserves pending edits when the panel is closed and reopened.
+- Fixes edge cases involving failed saves, failed restoration while pausing and repeated saves.
+- Audio processing, the volume curve and bidirectional volume linking are unchanged.
 
 ### Everyday operation
 
@@ -107,8 +123,8 @@ Settings are stored in the current Windows user's `%LOCALAPPDATA%\XiaomiStereo` 
 
 ### Validation, development and notices
 
-This release passed the software regression tests. Long physical playback runs, all suspend/resume conditions and acoustic synchronization measurements remain unverified. See [VALIDATION.md](docs/VALIDATION.md) for details.
+This release passed seven software test suites, including 11 settings scenarios and 60 window recovery/disposal cycles. No new hardware listening or acoustic acceptance tests were performed for this release. Long physical playback runs, all suspend/resume conditions and acoustic synchronization measurements remain unverified. See [VALIDATION.md](docs/VALIDATION.md) for details.
 
-Build on Windows x64 with PowerShell using `./build.ps1 -Tests`. The initial build downloads pinned NuGet build tools and verifies SHA-256; output goes to `release`. The default tests use in-memory audio, simulated routing and isolated processes. Hardware acceptance tests are not run automatically.
+Build on Windows x64 with PowerShell using `./build.ps1 -Tests`. To run software tests on a separate desktop, first compile with `-CompileTestsOnly`, then follow [VALIDATION.md](docs/VALIDATION.md). The initial build downloads pinned NuGet build tools and verifies SHA-256; output goes to `release`. The default tests use in-memory audio, simulated routing and isolated processes. Hardware acceptance tests are not run automatically.
 
 NAudio's license is in [licenses/NAudio.txt](licenses/NAudio.txt). No project-wide open-source license has been added; publishing the source is not an unrestricted redistribution grant. Xiaomi names and marks belong to their respective owners. This tool is not Xiaomi's native wireless grouping system and does not guarantee universal compatibility or identical acoustic latency.

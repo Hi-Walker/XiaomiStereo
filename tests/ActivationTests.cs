@@ -22,6 +22,7 @@ internal static class ActivationTests {
     [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr window,int command);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")] static extern bool IsIconic(IntPtr window);
+    [DllImport("user32.dll")] static extern bool IsWindow(IntPtr window);
     [StructLayout(LayoutKind.Sequential)] struct StartupInfo {
         internal uint Size;internal IntPtr Reserved,Desktop,Title;
         internal uint X,Y,XSize,YSize,XChars,YChars,Fill,Flags;
@@ -133,6 +134,7 @@ internal static class ActivationTests {
         using(var status=new OffscreenForm()) {
             main.Show();devices.Show(main);status.Show(main);Application.DoEvents();
             int forms=Application.OpenForms.Count;
+            var windows=new[]{main.Handle,devices.Handle,status.Handle};
             foreach(var form in new Form[]{main,devices,status}) {
                 form.Hide();StereoTray.RestoreWindow(form,false);
                 Check(form.Visible && form.WindowState==FormWindowState.Normal,"hidden window did not reappear");
@@ -161,19 +163,32 @@ internal static class ActivationTests {
             main.Enabled=true;
             main.Dispose();
             Check(devices.IsDisposed && status.IsDisposed,"owned windows leaked after owner disposal");
+            Check(Application.OpenForms.Count==forms-3,"disposed forms remained registered");
+            foreach(var window in windows)Check(!IsWindow(window),"disposed native window remained alive");
         }
     }
+    static void SettleResources() {
+        // Pump for the same fixed duration before every sample. GC alone does
+        // not process window/theme messages or allow startup work to settle.
+        var settle=Stopwatch.StartNew();
+        while(settle.ElapsedMilliseconds<1000){Application.DoEvents();Thread.Sleep(10);}
+        GC.Collect();GC.WaitForPendingFinalizers();GC.Collect();Application.DoEvents();
+    }
     static void TestWindowsAndResources() {
-        RestoreForms();GC.Collect();GC.WaitForPendingFinalizers();GC.Collect();
+        RestoreForms();SettleResources();
         using(var process=Process.GetCurrentProcess()) {
             int gdi=GetGuiResources(process.Handle,0),user=GetGuiResources(process.Handle,1);
             process.Refresh();int handles=process.HandleCount;
-            for(int i=0;i<20;i++)RestoreForms();
-            GC.Collect();GC.WaitForPendingFinalizers();GC.Collect();process.Refresh();
-            int afterGdi=GetGuiResources(process.Handle,0),afterUser=GetGuiResources(process.Handle,1);
-            Check(afterGdi<=gdi+2 && afterUser<=user+2 && process.HandleCount<=handles+3,"restore cycles grew resources");
-            Console.WriteLine("PASS off-screen main/device/status managed+native hidden/minimized HWND+owned restoration without activation; 20 cycles GDI {0}->{1}, USER {2}->{3}, handles {4}->{5}",
-                gdi,afterGdi,user,afterUser,handles,process.HandleCount);
+            for(int batch=1;batch<=3;batch++) {
+                for(int i=0;i<20;i++)RestoreForms();
+                process.Refresh();
+                Console.WriteLine("Batch {0} before draining messages: GDI={1}, USER={2}, handles={3}",batch,GetGuiResources(process.Handle,0),GetGuiResources(process.Handle,1),process.HandleCount);
+                SettleResources();process.Refresh();
+                int afterGdi=GetGuiResources(process.Handle,0),afterUser=GetGuiResources(process.Handle,1);
+                Console.WriteLine("Restore resource sample after {0} cycles: GDI {1}->{2}, USER {3}->{4}, handles {5}->{6}",batch*20,gdi,afterGdi,user,afterUser,handles,process.HandleCount);
+                Check(afterGdi<=gdi+2 && afterUser<=user+2 && process.HandleCount<=handles+3,"restore cycles grew resources");
+            }
+            Console.WriteLine("PASS off-screen main/device/status managed+native hidden/minimized HWND+owned restoration without activation; 60 cycles, disposed HWNDs/forms checked, fixed settling interval and unchanged resource thresholds");
             Console.WriteLine("Native hidden HWND with managed Visible=true observed: "+observedNativeVisibilityMismatch);
         }
     }

@@ -88,12 +88,12 @@ internal static class LifecycleTests {
             Check(host.Takes==1,"default takeover");
             var savedAt=File.GetLastWriteTimeUtc(Path.Combine(directory,"settings.json"));
             for(int i=0;i<20000;i++)host.Notice.OnDeviceAdded("irrelevant");
-            c.Configure(c.Current.Settings);c.RequestChoices();
+            c.ConfigureDevices(c.Current.Settings);c.RequestChoices();
             Await(()=>c.Current.ChoiceSerial==1,"choices");
             Check(File.GetLastWriteTimeUtc(Path.Combine(directory,"settings.json"))==savedAt,"no-op writes settings");
             Check(host.Opened==1 && host.Lists==1 && host.Attempts==1,"healthy storm recreated endpoints");
-            var mix=c.Current.Settings.Copy();mix.SwapChannels=true;mix.BalanceDb=3;c.Configure(mix);c.Resync();
-            Await(()=>host.MixChanges==1 && host.ResyncCount==1,"mix/resync");
+            c.SetSwap(true);long mixRevision=c.SetBalance(3);c.Resync();
+            Await(()=>c.Current.SettingsRevision>=mixRevision && host.MixChanges>=1 && host.ResyncCount==1,"mix/resync");
             Check(host.Opened==1,"mix reopened streams");
             host.External=true;host.Notice.OnDefaultDeviceChanged(DataFlow.Render,Role.Multimedia,"other");
             Await(()=>c.Current.State=="已暂停","external default takeover");
@@ -198,7 +198,7 @@ internal static class LifecycleTests {
             !saved.ManageDefaults && saved.BalanceDb==2.5 && saved.SwapChannels && cfg.LeftId==leftId,"device save changed other settings");
         bool? enabled=null;int mixes=0,devices=0,calibrations=0,resyncs=0,diagnostics=0;
         var actions=new StereoTray.PanelActions {
-            Enable=on=>enabled=on,Mix=()=>mixes++,Devices=()=>devices++,Calibration=()=>calibrations++,Resync=()=>resyncs++,Diagnostics=()=>diagnostics++
+            Enable=on=>enabled=on,Balance=value=>++mixes,Swap=value=>++mixes,Devices=()=>devices++,Calibration=()=>calibrations++,Resync=()=>resyncs++,Diagnostics=()=>diagnostics++
         };
         var view=new Coordinator.View {Settings=cfg,Enabled=true,State="正在转发",ChoiceSerial=1,
             Choices=new[]{new EndpointChoice(leftId,"扬声器（智能音箱 Pro-LEFT）",null,null),new EndpointChoice(rightId,"扬声器（智能音箱 Pro-RIGHT）",null,null)}};
@@ -239,18 +239,13 @@ internal static class LifecycleTests {
             Form panel=null;
             var actions=new StereoTray.PanelActions {
                 Enable=unused=>{},Devices=()=>{},Calibration=()=>{},Resync=()=>{},Diagnostics=()=>{},
-                Mix=()=>{
-                    var edit=c.Current.Settings.Copy();
-                    edit.SwapChannels=((CheckBox)panel.Controls.Find("swapChannels",true)[0]).Checked;
-                    edit.BalanceDb=((TrackBar)panel.Controls.Find("balance",true)[0]).Value/2.0;
-                    c.Configure(edit);
-                }
+                Balance=c.SetBalance,Swap=c.SetSwap
             };
             var choices=new[]{new EndpointChoice("source","source",null,null),new EndpointChoice("1111","left",null,null),
                 new EndpointChoice("2222","right",null,null),new EndpointChoice("ordinary","ordinary",null,null)};
             using(panel=StereoTray.BuildControlPanel(c.Current,null,actions))
             using(var devices=StereoTray.BuildDeviceSettings(c.Current.Settings.Copy(),choices,null,edit=>{
-                StereoTray.MergeDeviceMix(panel,edit,c.Current.Settings);c.Configure(edit);
+                c.ConfigureDevices(edit);
             })) {
                 host.HoldTick=true;
                 Check(host.TickEntered.WaitOne(3000),"pending mix tick barrier");
@@ -326,7 +321,7 @@ internal static class LifecycleTests {
                 Check(host.TickEntered.WaitOne(3000),"rebind test tick barrier");
                 var edited=c.Current.Settings.Copy();edited.LeftId="replacement-left";
                 host.External=external;
-                c.Configure(edited);
+                c.ConfigureDevices(edited);
                 host.Notice.OnDefaultDeviceChanged(DataFlow.Render,Role.Multimedia,external?"user-choice":"source");
                 if(explicitEnable)c.Enable(true);
                 host.TickContinue.Set();
@@ -335,7 +330,7 @@ internal static class LifecycleTests {
                     Check(!c.Current.Enabled && !store.Load().Enabled && host.Takes==1,
                         "rebind erased external output choice and reacquired defaults");
                     var pausedEdit=c.Current.Settings.Copy();pausedEdit.RightId="replacement-right";pausedEdit.Enabled=true;
-                    c.Configure(pausedEdit);
+                    c.ConfigureDevices(pausedEdit);
                     Await(()=>c.Current.Settings.RightId=="replacement-right","paused rebind settings");
                     Check(!c.Current.Enabled && !store.Load().Enabled && host.Takes==1,"saving paused settings enabled playback");
                 } else {

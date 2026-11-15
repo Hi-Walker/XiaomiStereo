@@ -1,4 +1,4 @@
-﻿param([string]$ToolCache = (Join-Path $env:LOCALAPPDATA 'XiaomiStereo.Build'), [switch]$Tests)
+﻿param([string]$ToolCache = (Join-Path $env:LOCALAPPDATA 'XiaomiStereo.Build'), [switch]$Tests, [switch]$CompileTestsOnly)
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 function Confirm-Hash($path, $expected) {
@@ -37,7 +37,7 @@ $icon = "$root\src\XiaomiStereo.ico"
 if ($LASTEXITCODE) { throw "Release compilation failed" }
 Copy-Item -LiteralPath "$root\app.config" -Destination "$out\小米立体声.exe.config" -Force
 Copy-Item -LiteralPath "$root\licenses\NAudio.txt" -Destination $out -Force
-if ($Tests) {
+if ($Tests -or $CompileTestsOnly) {
     $testOut = Join-Path $root 'test-bin'
     [void][IO.Directory]::CreateDirectory($testOut)
     Copy-Item "$root\lib\*.dll" -Destination $testOut -Force
@@ -45,7 +45,7 @@ if ($Tests) {
         $name = $test.BaseName
         & "$compiler\tools\csc.exe" @arguments /target:exe "/main:$name" "/out:$testOut\$name.exe" @source $test.FullName
         if ($LASTEXITCODE) { throw "Test compilation failed: $name" }
-        if ($name -eq 'HardwareAcceptance') { continue } # Runs only during an explicit hardware test.
+        if ($CompileTestsOnly -or $name -eq 'HardwareAcceptance') { continue } # Hardware tests require an explicit test session.
         & "$testOut\$name.exe"
         if ($LASTEXITCODE) { throw "Test failed: $name" }
     }

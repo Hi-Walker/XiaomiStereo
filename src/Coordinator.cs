@@ -69,7 +69,7 @@ internal sealed class Coordinator : IDisposable {
     internal sealed class View {
         public string State="正在启动", Detail="", Audio="", ChoiceError="", LastError="";
         public bool Enabled;
-        public long Generation, Restarts;
+        public long Generation, Restarts, SettingsRevision;
         public int RetrySeconds, ChoiceSerial;
         public EndpointChoice[] Choices=new EndpointChoice[0];
         public AppSettings Settings;
@@ -84,7 +84,8 @@ internal sealed class Coordinator : IDisposable {
     volatile bool quitting;
     bool joined;
     int? enableCommand;
-    AppSettings editCommand;
+    SettingsPatch settingsCommand;
+    long requestedSettingsRevision, completedSettingsRevision;
     bool resyncCommand, listCommand;
     int topologyFlag, defaultFlag, sleepFlag;
     long nextTry, nextHealth, nextTick, nextPublish, nextTopologyCheck, lastAttempt=-2000;
@@ -111,7 +112,81 @@ internal sealed class Coordinator : IDisposable {
     internal View Current {get {lock(gate) return snapshot;}}
     internal void Enable(bool on) {lock(gate){if(quitting)return;enableCommand=on?1:0;wake.Set();}}
     internal void Resync() {lock(gate){if(quitting)return;resyncCommand=true;wake.Set();}}
-    internal void Configure(AppSettings settings) {lock(gate){if(quitting)return;editCommand=settings.Copy();wake.Set();}}
+    // The UI submits only the fields the user changed. One pending patch retains
+    // the latest value per field, regardless of which view snapshot the UI saw.
+    internal long ConfigureDevices(AppSettings settings) {
+        lock(gate) {
+            if(quitting)return 0;
+            var devices=new DeviceEdit(settings);
+            var patch=NextSettingsPatch();patch.Devices=devices;
+            wake.Set();return patch.Revision;
+        }
+    }
+    internal long SetBalance(double value) {
+        lock(gate) {
+            if(quitting)return 0;
+            if(Double.IsNaN(value) || Double.IsInfinity(value) || Math.Abs(value)>24)
+                throw new ConfigurationException("声道平衡范围为 −24 到 +24 dB。");
+            var patch=NextSettingsPatch();patch.HasBalance=true;patch.Balance=value;
+            wake.Set();return patch.Revision;
+        }
+    }
+    internal long SetSwap(bool value) {
+        lock(gate) {
+            if(quitting)return 0;
+            var patch=NextSettingsPatch();patch.HasSwap=true;patch.Swap=value;
+            wake.Set();return patch.Revision;
+        }
+    }
+    SettingsPatch NextSettingsPatch() {
+        // Called under gate; rejected requests do not consume a sequence number.
+        if(requestedSettingsRevision==long.MaxValue)
+            throw new InvalidOperationException("设置请求序号已用尽，请重新启动程序。");
+        if(settingsCommand==null)settingsCommand=new SettingsPatch();
+        settingsCommand.Revision=++requestedSettingsRevision;
+        return settingsCommand;
+    }
+    sealed class DeviceEdit {
+        readonly string source,left,right,fallback,sourceContainer,leftContainer,rightContainer;
+        readonly bool manageDefaults;
+        internal DeviceEdit(AppSettings supplied) {
+            if(supplied==null)throw new ArgumentNullException("settings");
+            // Validate and bound only this atomic device group. Enabled, Profile
+            // and mix values from the caller are neither retained nor applied.
+            var devices=new AppSettings {
+                SourceId=supplied.SourceId,LeftId=supplied.LeftId,RightId=supplied.RightId,
+                FallbackId=supplied.FallbackId,SourceContainer=BoundContainer(supplied.SourceContainer),
+                LeftContainer=BoundContainer(supplied.LeftContainer),RightContainer=BoundContainer(supplied.RightContainer),
+                ManageDefaults=supplied.ManageDefaults
+            };
+            devices.Validate();
+            source=devices.SourceId;left=devices.LeftId;right=devices.RightId;fallback=devices.FallbackId;
+            sourceContainer=devices.SourceContainer;leftContainer=devices.LeftContainer;rightContainer=devices.RightContainer;
+            manageDefaults=devices.ManageDefaults;
+        }
+        static string BoundContainer(string value) {
+            if(value!=null && value.Length>2048)throw new ConfigurationException("设备容器 ID 过长。");
+            return value;
+        }
+        internal void ApplyTo(AppSettings settings) {
+            settings.SourceId=source;settings.LeftId=left;settings.RightId=right;settings.FallbackId=fallback;
+            settings.SourceContainer=sourceContainer;settings.LeftContainer=leftContainer;settings.RightContainer=rightContainer;
+            settings.ManageDefaults=manageDefaults;
+        }
+    }
+    sealed class SettingsPatch {
+        internal long Revision;
+        internal DeviceEdit Devices;
+        internal bool HasBalance,HasSwap,Swap;
+        internal double Balance;
+        internal AppSettings Merge(AppSettings current) {
+            var edit=current.Copy();
+            if(Devices!=null)Devices.ApplyTo(edit);
+            if(HasBalance)edit.BalanceDb=Balance;
+            if(HasSwap)edit.SwapChannels=Swap;
+            return edit;
+        }
+    }
     internal void RequestChoices() {lock(gate){if(quitting)return;listCommand=true;wake.Set();}}
     internal void SleepChanged(bool asleep) {Interlocked.Exchange(ref sleepFlag,asleep?1:2);Signal();}
     void Signal() {if(!quitting) {try {wake.Set();} catch(ObjectDisposedException) {} }}
@@ -198,9 +273,9 @@ internal sealed class Coordinator : IDisposable {
         long now=clock.ElapsedMilliseconds;
         bool checkHealth=now>=nextHealth;
         if(checkHealth)nextHealth=now+HealthPeriod;
-        int? command; AppSettings edit; bool sync,list;
+        int? command; bool sync,list;
         lock(gate) {
-            command=enableCommand;enableCommand=null; edit=editCommand;editCommand=null;
+            command=enableCommand;enableCommand=null;
             sync=resyncCommand;resyncCommand=false;list=listCommand;
         }
         int power=Interlocked.Exchange(ref sleepFlag,0);
@@ -215,7 +290,9 @@ internal sealed class Coordinator : IDisposable {
             if(!hasConfig) {CloseAudio();state="需要处理";detail="请修复设置文件后启用";blocked=true;wanted=false;}
             else Pause("已恢复普通输出");
         }
-        if(edit!=null) Apply(edit);
+        // Do not take this slot before the preceding pause completes. A failure
+        // there must leave accepted settings available for the next iteration.
+        bool edited=ApplyPendingSettings();
         if(command==1) {
             if(!hasConfig) {config=store.Load();hasConfig=true;}
             OpenSystem();
@@ -266,7 +343,24 @@ internal sealed class Coordinator : IDisposable {
                 }
             }
         }
-        if(now>=nextPublish || command.HasValue || edit!=null)Publish();
+        if(now>=nextPublish || command.HasValue || edited)Publish();
+    }
+    bool ApplyPendingSettings() {
+        SettingsPatch patch;
+        lock(gate){patch=settingsCommand;settingsCommand=null;}
+        if(patch==null)return false;
+        try {
+            if(!hasConfig)throw new ConfigurationException("请先修复 settings.json 再重新启用");
+            // Merge against the owner's current configuration, including any
+            // identity migration completed while this patch was waiting.
+            Apply(patch.Merge(config));
+            return true;
+        } finally {
+            // This batch is either applied or explicitly failed via Fault. The
+            // UI can stop waiting and render the actual committed settings.
+            completedSettingsRevision=patch.Revision;
+            nextPublish=0;
+        }
     }
     void Apply(AppSettings edit) {
         // Preserve the current user intent even if the editor was opened before a pause.
@@ -276,7 +370,8 @@ internal sealed class Coordinator : IDisposable {
             edit.RightId!=config.RightId || edit.FallbackId!=config.FallbackId ||
             edit.SourceContainer!=config.SourceContainer || edit.LeftContainer!=config.LeftContainer ||
             edit.RightContainer!=config.RightContainer || edit.ManageDefaults!=config.ManageDefaults;
-        if(!rebind && edit.SwapChannels==config.SwapChannels && edit.BalanceDb==config.BalanceDb)return;
+        if(!rebind && edit.SwapChannels==config.SwapChannels && edit.BalanceDb==config.BalanceDb &&
+            edit.Enabled==config.Enabled)return;
         if(rebind) {
             CloseAudio();
             // Restore can observe an external choice while settings are being saved.
@@ -365,6 +460,7 @@ internal sealed class Coordinator : IDisposable {
             catch(Exception e){view.Audio="等待音频统计";RecordError(e);}
         }
         view.Generation=generation;view.Restarts=successful;view.Enabled=wanted;
+        view.SettingsRevision=completedSettingsRevision;
         view.Settings=hasConfig?config.Copy():null;
         view.Choices=choices;view.ChoiceSerial=choiceSerial;view.ChoiceError=choiceError;
         if((pendingRestore || wanted && !blocked) && bridge==null && !sleeping)

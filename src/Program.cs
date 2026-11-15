@@ -118,9 +118,18 @@ internal sealed class StereoTray : IDisposable {
     TextBox statusText;
     bool pendingDevices;
     int priorSerial;
+    readonly PanelEdits panelEdits=new PanelEdits();
+    // Fixed UI state survives closing/reopening the panel while the owner is busy.
+    internal sealed class PanelEdits {
+        internal bool Refreshing,Swap;
+        internal double Balance;
+        internal long SwapRevision,BalanceRevision;
+    }
     internal sealed class PanelActions {
         public Action<bool> Enable;
-        public Action Mix,Devices,Calibration,Resync,Diagnostics;
+        public Func<double,long> Balance;
+        public Func<bool,long> Swap;
+        public Action Devices,Calibration,Resync,Diagnostics;
     }
     sealed class Card : Panel {
         internal Card(){BackColor=Color.White;Padding=new Padding(16);Margin=new Padding(0,0,0,12);Dock=DockStyle.Fill;}
@@ -157,25 +166,17 @@ internal sealed class StereoTray : IDisposable {
     internal void OpenControlPanel() {
         if(controlWindow!=null){RestoreWindow(controlWindow);return;}
         var actions=new PanelActions {
-            Enable=coordinator.Enable,Mix=ApplyMix,Devices=OpenDevices,
+            Enable=coordinator.Enable,Balance=coordinator.SetBalance,Swap=coordinator.SetSwap,Devices=OpenDevices,
             Calibration=()=>{using(var details=BuildCalibration(logo))details.ShowDialog(controlWindow);},
             Resync=coordinator.Resync,Diagnostics=OpenStatus
         };
-        var form=BuildControlPanel(coordinator.Current,logo,actions);
+        var form=BuildControlPanel(coordinator.Current,logo,actions,panelEdits);
         controlWindow=form;
         form.FormClosed+=(s,e)=>{controlWindow=null;pendingDevices=false;};
         form.Show();
         RestoreWindow(form);
         // Names are refreshed after the window is already usable. Enumeration failure leaves controls available.
         coordinator.RequestChoices();
-    }
-    void ApplyMix() {
-        var latest=coordinator.Current.Settings;
-        if(latest==null || controlWindow==null)return;
-        var copy=latest.Copy();
-        copy.SwapChannels=((CheckBox)Control(controlWindow,"swapChannels")).Checked;
-        copy.BalanceDb=((TrackBar)Control(controlWindow,"balance")).Value/2.0;
-        coordinator.Configure(copy);
     }
     void OpenDevices() {
         if(deviceWindow!=null){RestoreWindow(deviceWindow);return;}
@@ -188,24 +189,11 @@ internal sealed class StereoTray : IDisposable {
         Control(controlWindow,"controlDetail").Text="正在读取可用设备…";
     }
     void ShowDeviceSettings(Coordinator.View view) {
-        var form=BuildDeviceSettings(view.Settings.Copy(),view.Choices,logo,edited=>{
-            MergeDeviceMix(controlWindow,edited,coordinator.Current.Settings);
-            coordinator.Configure(edited);
-        });
+        var form=BuildDeviceSettings(view.Settings.Copy(),view.Choices,logo,edited=>coordinator.ConfigureDevices(edited));
         deviceWindow=form;
         form.FormClosed+=(s,e)=>deviceWindow=null;
         form.Show(controlWindow);
         RestoreWindow(form);
-    }
-    internal static void MergeDeviceMix(Form panel,AppSettings edited,AppSettings latest) {
-        // A device save can replace a pending mix command before the owner publishes its snapshot.
-        // The visible controls hold the user's newer mix values in that interval.
-        if(panel!=null && !panel.IsDisposed) {
-            edited.SwapChannels=((CheckBox)Control(panel,"swapChannels")).Checked;
-            edited.BalanceDb=((TrackBar)Control(panel,"balance")).Value/2.0;
-        } else if(latest!=null) {
-            edited.SwapChannels=latest.SwapChannels;edited.BalanceDb=latest.BalanceDb;
-        }
     }
     string Summary(Coordinator.View view,bool forDisplay) {
         var text=new StringBuilder();text.AppendLine(view.State);
@@ -340,17 +328,23 @@ internal sealed class StereoTray : IDisposable {
         Control(form,"resync").Enabled=running && view.Enabled;
         var swap=(CheckBox)Control(form,"swapChannels");var balance=(TrackBar)Control(form,"balance");
         swap.Enabled=balance.Enabled=view.Settings!=null;Control(form,"restoreBalance").Enabled=view.Settings!=null;
-        form.Tag=true;
+        var edits=(PanelEdits)form.Tag;
+        if(view.SettingsRevision>=edits.SwapRevision)edits.SwapRevision=0;
+        if(view.SettingsRevision>=edits.BalanceRevision)edits.BalanceRevision=0;
+        edits.Refreshing=true;
         try {
             if(view.Settings!=null) {
-                swap.Checked=view.Settings.SwapChannels;
-                if(!balance.Capture && !balance.Focused)balance.Value=(int)Math.Round(view.Settings.BalanceDb*2);
+                swap.Checked=edits.SwapRevision>0?edits.Swap:view.Settings.SwapChannels;
+                if(!balance.Capture && !balance.Focused)
+                    balance.Value=(int)Math.Round((edits.BalanceRevision>0?edits.Balance:view.Settings.BalanceDb)*2);
             }
             swap.Text=swap.Checked?"左右声道已交换":"交换左右声道";
-        } finally {form.Tag=false;}
+        } finally {edits.Refreshing=false;}
     }
-    internal static Form BuildControlPanel(Coordinator.View view,Icon logo,PanelActions actions) {
-        var form=NewWindow("控制面板",logo,new Size(680,650));form.StartPosition=FormStartPosition.CenterScreen;form.Tag=true;
+    internal static Form BuildControlPanel(Coordinator.View view,Icon logo,PanelActions actions,PanelEdits edits=null) {
+        if(edits==null)edits=new PanelEdits();
+        var form=NewWindow("控制面板",logo,new Size(680,650));form.StartPosition=FormStartPosition.CenterScreen;
+        form.Tag=edits;edits.Refreshing=true;
         var root=new TableLayoutPanel{Dock=DockStyle.Fill,Padding=new Padding(24,16,24,16),ColumnCount=1,RowCount=6};
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));
         foreach(int height in new[]{64,112,194,114,76})root.RowStyles.Add(new RowStyle(SizeType.Absolute,height));
@@ -390,7 +384,11 @@ internal sealed class StereoTray : IDisposable {
         var swap=new CheckBox{Name="swapChannels",Appearance=Appearance.Button,FlatStyle=FlatStyle.Flat,TextAlign=ContentAlignment.MiddleCenter,
             Anchor=AnchorStyles.Right,Width=136,Height=28,Margin=new Padding(0),Cursor=Cursors.Hand};
         swap.FlatAppearance.BorderColor=Line;swap.FlatAppearance.CheckedBackColor=Color.FromArgb(255,240,228);
-        swap.CheckedChanged+=(s,e)=>{if(!(bool)form.Tag){swap.Text=swap.Checked?"左右声道已交换":"交换左右声道";actions.Mix();}};
+        swap.CheckedChanged+=(s,e)=>{
+            if(edits.Refreshing)return;
+            swap.Text=swap.Checked?"左右声道已交换":"交换左右声道";
+            edits.Swap=swap.Checked;edits.SwapRevision=actions.Swap(swap.Checked);
+        };
         sound.Controls.Add(swap,1,1);
         var balanceRow=new TableLayoutPanel{Dock=DockStyle.Fill,ColumnCount=2,RowCount=1,Margin=new Padding(0)};
         balanceRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));balanceRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,100));
@@ -401,7 +399,10 @@ internal sealed class StereoTray : IDisposable {
         var centerLabel=Label("居中",null,Muted);centerLabel.TextAlign=ContentAlignment.MiddleCenter;scale.Controls.Add(centerLabel,1,0);
         var rightLabel=Label("偏右",null,Muted);rightLabel.TextAlign=ContentAlignment.MiddleRight;scale.Controls.Add(rightLabel,2,0);
         var balance=new TrackBar{Name="balance",Minimum=-48,Maximum=48,SmallChange=1,LargeChange=6,TickStyle=TickStyle.None,AutoSize=false,Dock=DockStyle.Fill,Margin=new Padding(0)};
-        balance.ValueChanged+=(s,e)=>{if(!(bool)form.Tag)actions.Mix();};
+        balance.ValueChanged+=(s,e)=>{
+            if(edits.Refreshing)return;
+            edits.Balance=balance.Value/2.0;edits.BalanceRevision=actions.Balance(edits.Balance);
+        };
         scale.Controls.Add(balance,0,1);scale.SetColumnSpan(balance,3);balanceRow.Controls.Add(scale,0,0);
         var center=Button("恢复居中","restoreBalance",false);center.Anchor=AnchorStyles.Right;center.Width=90;center.Margin=new Padding(10,10,0,0);
         center.Click+=(s,e)=>balance.Value=0;balanceRow.Controls.Add(center,1,0);sound.Controls.Add(balanceRow,0,2);sound.SetColumnSpan(balanceRow,2);
