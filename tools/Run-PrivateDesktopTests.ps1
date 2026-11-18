@@ -22,8 +22,8 @@ foreach ($test in $TestExe) {
     $exe = (Resolve-Path -LiteralPath $test -ErrorAction Stop).Path
     $name = [IO.Path]::GetFileNameWithoutExtension($exe)
     # Prevent accidentally running the installed application or a hardware test.
-    if ($name -notmatch '^(AudioTests|RoutingTests|LifecycleTests|VolumeTests|StateDirectoryTests|ActivationTests|SettingsTests|ShutdownPowerTests)$' -and -not ($Fixture -and $name -eq 'PrivateDesktopFixture')) {
-        throw "Only the offline test executables or the explicit harmless fixture are allowed: $exe"
+    if ($name -notmatch '^(AudioTests|RoutingTests|LifecycleTests|VolumeTests|StateDirectoryTests|ActivationTests|SettingsTests|ShutdownPowerTests|ThemeTests)$' -and -not ($Fixture -and $name -eq 'PrivateDesktopFixture')) {
+        throw "Only the offline test executables listed above or the explicit harmless fixture are allowed: $exe"
     }
     $cwd = if ($WorkingDirectory) { (Resolve-Path -LiteralPath $WorkingDirectory).Path } else { [IO.Path]::GetDirectoryName($exe) }
     $prefix = '{0:D2}-{1}' -f (++$counter),$name

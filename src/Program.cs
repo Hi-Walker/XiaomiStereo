@@ -44,7 +44,7 @@ internal static class StereoProgram {
             Application.SetCompatibleTextRenderingDefault(false);
             try {
                 using(var worker=new Coordinator(directory))
-                using(var tray=new StereoTray(worker,activation)) {
+                using(var tray=new StereoTray(worker,activation,directory)) {
                     int sessionEnded=0;
                     EventHandler exit=(s,e)=>worker.Dispose();
                     // SessionEnding can be cancelled. Release only after Windows confirms the session ended.
@@ -109,10 +109,9 @@ internal sealed class ActivationSignal : IDisposable {
 }
 
 internal sealed class StereoTray : IDisposable {
-    static readonly Color Background=Color.FromArgb(245,246,248), Ink=Color.FromArgb(32,36,43),
-        Muted=Color.FromArgb(103,111,123), Line=Color.FromArgb(226,230,235), Orange=Color.FromArgb(255,105,0);
     readonly Coordinator coordinator;
     readonly ActivationSignal activation;
+    readonly UiPreferenceStore uiPreferences;
     readonly ContextMenuStrip menu=new ContextMenuStrip();
     readonly NotifyIcon icon=new NotifyIcon();
     readonly System.Windows.Forms.Timer timer=new System.Windows.Forms.Timer();
@@ -122,6 +121,8 @@ internal sealed class StereoTray : IDisposable {
     TextBox statusText;
     bool pendingDevices;
     int priorSerial;
+    int themeDirty;
+    readonly UserPreferenceChangedEventHandler themeChanged;
     readonly PanelEdits panelEdits=new PanelEdits();
     // Fixed UI state survives closing/reopening the panel while the owner is busy.
     internal sealed class PanelEdits {
@@ -134,25 +135,34 @@ internal sealed class StereoTray : IDisposable {
         public Func<double,long> Balance;
         public Func<bool,long> Swap;
         public Action Devices,Calibration,Resync,Diagnostics;
+        public Func<UiThemeMode,bool> Theme;
     }
     sealed class Card : Panel {
-        internal Card(){BackColor=Color.White;Padding=new Padding(16);Margin=new Padding(0,0,0,12);Dock=DockStyle.Fill;}
+        internal Card(){UiTheme.SetRole(this,UiRole.Surface);Padding=new Padding(16);Margin=new Padding(0,0,0,12);Dock=DockStyle.Fill;}
         protected override void OnPaint(PaintEventArgs e) {
             base.OnPaint(e);
-            using(var pen=new Pen(Line))e.Graphics.DrawRectangle(pen,0,0,Width-1,Height-1);
+            if(Width>0 && Height>0)using(var pen=new Pen(UiTheme.ForControl(this).Border))e.Graphics.DrawRectangle(pen,0,0,Width-1,Height-1);
         }
     }
-    internal StereoTray(Coordinator c,ActivationSignal activation=null) {
+    internal StereoTray(Coordinator c,ActivationSignal activation=null,string directory=null) {
         coordinator=c;this.activation=activation;
+        uiPreferences=new UiPreferenceStore(directory ?? ConfigStore.DefaultDirectory);
+        UiTheme.SetMode(uiPreferences.Mode);
         artwork=typeof(StereoTray).Assembly.GetManifestResourceStream("XiaomiStereo.ico");
         logo=new Icon(artwork,new Size(48,48));
         menu.Items.Add("打开控制面板",null,(s,e)=>OpenControlPanel());
         menu.Items.Add("退出",null,(s,e)=>Application.ExitThread());
+        UiTheme.ApplyMenu(menu);
         icon.Icon=logo;icon.Text="小米立体声";icon.ContextMenuStrip=menu;
         icon.DoubleClick+=(s,e)=>OpenControlPanel();icon.Visible=true;
+        // SystemEvents can arrive off the UI thread. Coalesce them for the
+        // existing UI timer; no extra thread, timer or per-window subscription.
+        themeChanged=(s,e)=>Interlocked.Exchange(ref themeDirty,1);
+        SystemEvents.UserPreferenceChanged+=themeChanged;
         timer.Interval=1000;timer.Tick+=(s,e)=>RefreshView();timer.Start();
     }
     void RefreshView() {
+        if(Interlocked.Exchange(ref themeDirty,0)!=0 && UiTheme.RefreshFromSystem())ApplyTheme();
         if(activation!=null && activation.Consume())OpenControlPanel();
         var view=coordinator.Current;
         string tip=BoundedDiagnostics.Limit("小米立体声 · "+view.State,63);
@@ -167,14 +177,30 @@ internal sealed class StereoTray : IDisposable {
             } else if(view.Settings!=null)ShowDeviceSettings(view);
         }
     }
+    void ApplyTheme() {
+        foreach(Form form in Application.OpenForms)if(!form.IsDisposed)UiTheme.Apply(form);
+        UiTheme.ApplyMenu(menu);
+    }
+    bool ChooseTheme(UiThemeMode mode) {
+        try {
+            // This UI-only preference is committed before displaying success.
+            // No coordinator request, device rebind or audio settings write.
+            uiPreferences.SetMode(mode);UiTheme.SetMode(mode);ApplyTheme();return true;
+        } catch(Exception error) {
+            if(!(error is IOException || error is UnauthorizedAccessException || error is ConfigurationException || error is System.Security.SecurityException))throw;
+            MessageBox.Show(controlWindow,"主题设置未能保存，已保留原选择。\r\n"+BoundedDiagnostics.Limit(error.Message,240),
+                "小米立体声 · 界面主题",MessageBoxButtons.OK,MessageBoxIcon.Warning);
+            return false;
+        }
+    }
     internal void OpenControlPanel() {
         if(controlWindow!=null){RestoreWindow(controlWindow);return;}
         var actions=new PanelActions {
             Enable=coordinator.Enable,Balance=coordinator.SetBalance,Swap=coordinator.SetSwap,Devices=OpenDevices,
             Calibration=()=>{using(var details=BuildCalibration(logo))details.ShowDialog(controlWindow);},
-            Resync=coordinator.Resync,Diagnostics=OpenStatus
+            Resync=coordinator.Resync,Diagnostics=OpenStatus,Theme=ChooseTheme
         };
-        var form=BuildControlPanel(coordinator.Current,logo,actions,panelEdits);
+        var form=BuildControlPanel(coordinator.Current,logo,actions,panelEdits,uiPreferences.Mode);
         controlWindow=form;
         form.FormClosed+=(s,e)=>{controlWindow=null;pendingDevices=false;};
         form.Show();
@@ -275,28 +301,29 @@ internal sealed class StereoTray : IDisposable {
         var content=new TableLayoutPanel{Dock=DockStyle.Fill,Padding=new Padding(18),ColumnCount=1,RowCount=2};
         content.RowStyles.Add(new RowStyle(SizeType.Percent,100));content.RowStyles.Add(new RowStyle(SizeType.Absolute,46));
         var text=new TextBox{Name="diagnosticsText",Multiline=true,ReadOnly=true,Dock=DockStyle.Fill,ScrollBars=ScrollBars.Vertical,
-            BackColor=Color.White,BorderStyle=BorderStyle.FixedSingle,Text=summary};
+            BorderStyle=BorderStyle.FixedSingle,Text=summary};
         var export=Button("导出诊断…","exportDiagnostics",false);export.Anchor=AnchorStyles.Right;export.Width=108;
         export.Click+=(s,e)=>exportAction(form);
-        content.Controls.Add(text,0,0);content.Controls.Add(export,0,1);form.Controls.Add(content);return form;
+        content.Controls.Add(text,0,0);content.Controls.Add(export,0,1);form.Controls.Add(content);UiTheme.Apply(form);return form;
     }
     static Form NewWindow(string title,Icon logo,Size size) {
-        return new Form{Text="小米立体声 · "+title,Icon=logo,Font=SystemFonts.MessageBoxFont,ForeColor=Ink,
-            BackColor=Background,ClientSize=size,AutoScaleMode=AutoScaleMode.Dpi,AutoScaleDimensions=new SizeF(96,96),
+        return new ThemeForm{Text="小米立体声 · "+title,Icon=logo,Font=SystemFonts.MessageBoxFont,
+            ClientSize=size,AutoScaleMode=AutoScaleMode.Dpi,AutoScaleDimensions=new SizeF(96,96),
             FormBorderStyle=FormBorderStyle.FixedDialog,MaximizeBox=false,StartPosition=FormStartPosition.CenterParent};
     }
     static void FontSize(Control control,float size,FontStyle style) {
         var font=new Font(SystemFonts.MessageBoxFont.FontFamily,size,style);
         control.Font=font;control.Disposed+=(s,e)=>font.Dispose();
     }
-    static Label Label(string text,string name,Color color) {
-        return new Label{Text=text,Name=name,ForeColor=color,AutoEllipsis=true,Dock=DockStyle.Fill,TextAlign=ContentAlignment.MiddleLeft,Margin=new Padding(0)};
+    static Label Label(string text,string name,UiRole role) {
+        var label=new Label{Text=text,Name=name,AutoEllipsis=true,Dock=DockStyle.Fill,TextAlign=ContentAlignment.MiddleLeft,Margin=new Padding(0)};
+        UiTheme.SetRole(label,role);return label;
     }
     static Button Button(string text,string name,bool primary) {
         var button=new Button{Text=text,Name=name,FlatStyle=FlatStyle.Flat,Height=34,AutoSize=false,
-            BackColor=primary?Orange:Color.White,ForeColor=primary?Color.White:Ink,Cursor=Cursors.Hand,Margin=new Padding(0)};
-        button.FlatAppearance.BorderSize=primary?0:1;button.FlatAppearance.BorderColor=Line;
-        button.FlatAppearance.MouseOverBackColor=primary?Color.FromArgb(232,92,0):Color.FromArgb(247,248,250);
+            Cursor=Cursors.Hand,Margin=new Padding(0)};
+        UiTheme.SetRole(button,primary?UiRole.Primary:UiRole.Default);
+        button.FlatAppearance.BorderSize=primary?0:1;
         return button;
     }
     static Control Control(Form form,string name){return form.Controls.Find(name,true)[0];}
@@ -319,7 +346,7 @@ internal sealed class StereoTray : IDisposable {
         else if(status=="等待输入")status="立体声已开启，等待声音";
         else if(status=="静音包")status="立体声已开启，当前无声音";
         var state=Control(form,"controlState");state.Text=status;
-        state.ForeColor=fault?Color.FromArgb(180,45,45):running?Color.FromArgb(30,116,76):Muted;
+        UiTheme.SetRole(state,fault?UiRole.Error:running?UiRole.Success:UiRole.Muted);UiTheme.Apply(state);
         string detail=view.Detail;
         if(String.IsNullOrEmpty(detail) && view.ChoiceError!="")detail="设备列表暂不可用。"+view.ChoiceError;
         if(String.IsNullOrEmpty(detail))detail=view.Enabled?"暂停时恢复普通扬声器；正常使用保持默认即可。":"声音使用普通输出。点击启用即可恢复双音箱立体声。";
@@ -345,7 +372,10 @@ internal sealed class StereoTray : IDisposable {
             swap.Text=swap.Checked?"左右声道已交换":"交换左右声道";
         } finally {edits.Refreshing=false;}
     }
-    internal static Form BuildControlPanel(Coordinator.View view,Icon logo,PanelActions actions,PanelEdits edits=null) {
+    internal static void RefreshThemePicker(Form form,UiThemeMode mode) {
+        ((ThemePickerButton)Control(form,"themePicker")).SetSelection(mode);
+    }
+    internal static Form BuildControlPanel(Coordinator.View view,Icon logo,PanelActions actions,PanelEdits edits=null,UiThemeMode themeMode=UiThemeMode.System) {
         if(edits==null)edits=new PanelEdits();
         var form=NewWindow("控制面板",logo,new Size(680,650));form.StartPosition=FormStartPosition.CenterScreen;
         form.Tag=edits;edits.Refreshing=true;
@@ -353,20 +383,24 @@ internal sealed class StereoTray : IDisposable {
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));
         foreach(int height in new[]{64,112,194,114,76})root.RowStyles.Add(new RowStyle(SizeType.Absolute,height));
         root.RowStyles.Add(new RowStyle(SizeType.Percent,100));
-        var header=new TableLayoutPanel{Dock=DockStyle.Fill,ColumnCount=2,RowCount=2,Margin=new Padding(0,0,0,8)};
+        var header=new TableLayoutPanel{Dock=DockStyle.Fill,ColumnCount=3,RowCount=2,Margin=new Padding(0,0,0,8)};
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,60));header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,44));
         header.RowStyles.Add(new RowStyle(SizeType.Absolute,32));header.RowStyles.Add(new RowStyle(SizeType.Percent,100));
         var picture=new PictureBox{Dock=DockStyle.Fill,SizeMode=PictureBoxSizeMode.CenterImage,Margin=new Padding(0,0,12,0)};
         if(logo!=null){picture.Image=logo.ToBitmap();picture.Disposed+=(s,e)=>picture.Image.Dispose();}
         header.Controls.Add(picture,0,0);header.SetRowSpan(picture,2);
-        var title=Label("小米立体声",null,Ink);FontSize(title,18,FontStyle.Bold);
-        header.Controls.Add(title,1,0);header.Controls.Add(Label("双 USB 音箱控制面板",null,Muted),1,1);root.Controls.Add(header,0,0);
+        var title=Label("小米立体声",null,UiRole.Default);FontSize(title,18,FontStyle.Bold);
+        header.Controls.Add(title,1,0);header.Controls.Add(Label("双 USB 音箱控制面板",null,UiRole.Muted),1,1);root.Controls.Add(header,0,0);
+        var themePicker=new ThemePickerButton(themeMode,mode=>actions.Theme==null || actions.Theme(mode));
+        themePicker.Anchor=AnchorStyles.Right;themePicker.Margin=new Padding(4,0,0,0);
+        header.Controls.Add(themePicker,2,0);header.SetRowSpan(themePicker,2);
 
         var status=new Card();var statusLayout=new TableLayoutPanel{Dock=DockStyle.Fill,ColumnCount=2,RowCount=2,Margin=new Padding(0)};
         statusLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));statusLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,136));
         statusLayout.RowStyles.Add(new RowStyle(SizeType.Absolute,30));statusLayout.RowStyles.Add(new RowStyle(SizeType.Percent,100));
-        var state=Label("正在读取状态","controlState",Ink);FontSize(state,11,FontStyle.Bold);statusLayout.Controls.Add(state,0,0);
-        var detail=Label("","controlDetail",Muted);detail.TextAlign=ContentAlignment.TopLeft;detail.Margin=new Padding(0,4,14,0);statusLayout.Controls.Add(detail,0,1);
+        var state=Label("正在读取状态","controlState",UiRole.Default);FontSize(state,11,FontStyle.Bold);statusLayout.Controls.Add(state,0,0);
+        var detail=Label("","controlDetail",UiRole.Muted);detail.TextAlign=ContentAlignment.TopLeft;detail.Margin=new Padding(0,4,14,0);statusLayout.Controls.Add(detail,0,1);
         var actionsPanel=new TableLayoutPanel{Dock=DockStyle.Fill,RowCount=2,ColumnCount=1,Margin=new Padding(0)};
         actionsPanel.RowStyles.Add(new RowStyle(SizeType.Absolute,36));actionsPanel.RowStyles.Add(new RowStyle(SizeType.Percent,100));
         var toggle=Button("启用立体声","toggleStereo",true);toggle.Dock=DockStyle.Fill;
@@ -381,13 +415,12 @@ internal sealed class StereoTray : IDisposable {
         for(int side=0;side<2;side++) {
             var block=new TableLayoutPanel{Dock=DockStyle.Fill,ColumnCount=1,RowCount=2,Margin=new Padding(side==0?0:16,0,0,0)};
             block.RowStyles.Add(new RowStyle(SizeType.Absolute,20));block.RowStyles.Add(new RowStyle(SizeType.Percent,100));
-            block.Controls.Add(Label(side==0?"左侧音箱":"右侧音箱",null,Muted),0,0);
-            var name=Label("",side==0?"leftSpeaker":"rightSpeaker",Ink);FontSize(name,13,FontStyle.Bold);block.Controls.Add(name,0,1);sound.Controls.Add(block,side,0);
+            block.Controls.Add(Label(side==0?"左侧音箱":"右侧音箱",null,UiRole.Muted),0,0);
+            var name=Label("",side==0?"leftSpeaker":"rightSpeaker",UiRole.Default);FontSize(name,13,FontStyle.Bold);block.Controls.Add(name,0,1);sound.Controls.Add(block,side,0);
         }
-        sound.Controls.Add(Label("音量平衡",null,Ink),0,1);
+        sound.Controls.Add(Label("音量平衡",null,UiRole.Default),0,1);
         var swap=new CheckBox{Name="swapChannels",Appearance=Appearance.Button,FlatStyle=FlatStyle.Flat,TextAlign=ContentAlignment.MiddleCenter,
             Anchor=AnchorStyles.Right,Width=136,Height=28,Margin=new Padding(0),Cursor=Cursors.Hand};
-        swap.FlatAppearance.BorderColor=Line;swap.FlatAppearance.CheckedBackColor=Color.FromArgb(255,240,228);
         swap.CheckedChanged+=(s,e)=>{
             if(edits.Refreshing)return;
             swap.Text=swap.Checked?"左右声道已交换":"交换左右声道";
@@ -395,27 +428,28 @@ internal sealed class StereoTray : IDisposable {
         };
         sound.Controls.Add(swap,1,1);
         var balanceRow=new TableLayoutPanel{Dock=DockStyle.Fill,ColumnCount=2,RowCount=1,Margin=new Padding(0)};
+        balanceRow.RowStyles.Add(new RowStyle(SizeType.Percent,100));
         balanceRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));balanceRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,100));
         var scale=new TableLayoutPanel{Dock=DockStyle.Fill,ColumnCount=3,RowCount=2,Margin=new Padding(0,3,0,0)};
         for(int col=0;col<3;col++)scale.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100f/3));
         scale.RowStyles.Add(new RowStyle(SizeType.Absolute,20));scale.RowStyles.Add(new RowStyle(SizeType.Percent,100));
-        scale.Controls.Add(Label("偏左",null,Muted),0,0);
-        var centerLabel=Label("居中",null,Muted);centerLabel.TextAlign=ContentAlignment.MiddleCenter;scale.Controls.Add(centerLabel,1,0);
-        var rightLabel=Label("偏右",null,Muted);rightLabel.TextAlign=ContentAlignment.MiddleRight;scale.Controls.Add(rightLabel,2,0);
+        scale.Controls.Add(Label("偏左",null,UiRole.Muted),0,0);
+        var centerLabel=Label("居中",null,UiRole.Muted);centerLabel.TextAlign=ContentAlignment.MiddleCenter;scale.Controls.Add(centerLabel,1,0);
+        var rightLabel=Label("偏右",null,UiRole.Muted);rightLabel.TextAlign=ContentAlignment.MiddleRight;scale.Controls.Add(rightLabel,2,0);
         var balance=new TrackBar{Name="balance",Minimum=-48,Maximum=48,SmallChange=1,LargeChange=6,TickStyle=TickStyle.None,AutoSize=false,Dock=DockStyle.Fill,Margin=new Padding(0)};
         balance.ValueChanged+=(s,e)=>{
             if(edits.Refreshing)return;
             edits.Balance=balance.Value/2.0;edits.BalanceRevision=actions.Balance(edits.Balance);
         };
         scale.Controls.Add(balance,0,1);scale.SetColumnSpan(balance,3);balanceRow.Controls.Add(scale,0,0);
-        var center=Button("恢复居中","restoreBalance",false);center.Anchor=AnchorStyles.Right;center.Width=90;center.Margin=new Padding(10,10,0,0);
+        var center=Button("恢复居中","restoreBalance",false);center.Anchor=AnchorStyles.Right;center.Width=90;center.Margin=new Padding(10,0,0,0);
         center.Click+=(s,e)=>balance.Value=0;balanceRow.Controls.Add(center,1,0);sound.Controls.Add(balanceRow,0,2);sound.SetColumnSpan(balanceRow,2);
         speakers.Controls.Add(sound);root.Controls.Add(speakers,0,2);
 
         var syncCard=new Card();var sync=new TableLayoutPanel{Dock=DockStyle.Fill,ColumnCount=1,RowCount=2,Margin=new Padding(0)};
         sync.RowStyles.Add(new RowStyle(SizeType.Absolute,22));sync.RowStyles.Add(new RowStyle(SizeType.Percent,100));
-        var syncTitle=Label("音量自动双向同步",null,Ink);FontSize(syncTitle,10,FontStyle.Bold);sync.Controls.Add(syncTitle,0,0);
-        sync.Controls.Add(Label("立体声运行时，调 Windows → 两台音箱。\r\n调任意音箱的小米 App 或机身按键 → Windows 和另一台音箱。","volumeSyncHelp",Muted),0,1);
+        var syncTitle=Label("音量自动双向同步",null,UiRole.Default);FontSize(syncTitle,10,FontStyle.Bold);sync.Controls.Add(syncTitle,0,0);
+        sync.Controls.Add(Label("立体声运行时，调 Windows → 两台音箱。\r\n调任意音箱的小米 App 或机身按键 → Windows 和另一台音箱。","volumeSyncHelp",UiRole.Muted),0,1);
         syncCard.Controls.Add(sync);root.Controls.Add(syncCard,0,3);
 
         var tools=new TableLayoutPanel{Dock=DockStyle.Fill,ColumnCount=4,RowCount=1,Margin=new Padding(0,4,0,14)};
@@ -430,9 +464,9 @@ internal sealed class StereoTray : IDisposable {
         root.Controls.Add(tools,0,4);
         var footer=new TableLayoutPanel{Dock=DockStyle.Fill,ColumnCount=2,RowCount=1,Margin=new Padding(0)};
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,98));
-        footer.Controls.Add(Label("自动采用稳定模式，无需调整。\r\n电脑播放时，请保持米家中的立体声／全屋组合关闭。",null,Muted),0,0);
-        var version=Label("版本 "+typeof(StereoTray).Assembly.GetName().Version.ToString(3),"version",Muted);version.TextAlign=ContentAlignment.MiddleRight;footer.Controls.Add(version,1,0);
-        root.Controls.Add(footer,0,5);form.Controls.Add(root);RefreshControlPanel(form,view);return form;
+        footer.Controls.Add(Label("自动采用稳定模式，无需调整。\r\n电脑播放时，请保持米家中的立体声／全屋组合关闭。",null,UiRole.Muted),0,0);
+        var version=Label("版本 "+typeof(StereoTray).Assembly.GetName().Version.ToString(3),"version",UiRole.Muted);version.TextAlign=ContentAlignment.MiddleRight;footer.Controls.Add(version,1,0);
+        root.Controls.Add(footer,0,5);form.Controls.Add(root);UiTheme.Apply(form);RefreshThemePicker(form,themeMode);RefreshControlPanel(form,view);return form;
     }
     sealed class DeviceItem {
         internal readonly string Id,Container;
@@ -441,7 +475,7 @@ internal sealed class StereoTray : IDisposable {
         public override string ToString(){return label;}
     }
     static ComboBox Selector(EndpointChoice[] devices,string current,string container) {
-        var combo=new ComboBox{DropDownStyle=ComboBoxStyle.DropDownList,Dock=DockStyle.Fill,DropDownWidth=480};
+        var combo=new ThemeComboBox{DropDownStyle=ComboBoxStyle.DropDownList,Dock=DockStyle.Fill,DropDownWidth=480};
         combo.Items.Add(new DeviceItem(null,null,"未指定"));combo.SelectedIndex=0;
         var names=new Dictionary<string,int>(StringComparer.OrdinalIgnoreCase);
         foreach(var item in devices){string name=item.Name??"扬声器";int count;names.TryGetValue(name,out count);names[name]=count+1;}
@@ -465,14 +499,14 @@ internal sealed class StereoTray : IDisposable {
         grid.RowStyles.Add(new RowStyle(SizeType.Absolute,34));
         for(int row=0;row<4;row++)grid.RowStyles.Add(new RowStyle(SizeType.Absolute,40));
         grid.RowStyles.Add(new RowStyle(SizeType.Absolute,72));grid.RowStyles.Add(new RowStyle(SizeType.Absolute,36));grid.RowStyles.Add(new RowStyle(SizeType.Percent,100));
-        var intro=Label("设备已选好时，保持当前设置即可。",null,Muted);grid.Controls.Add(intro,0,0);grid.SetColumnSpan(intro,2);
+        var intro=Label("设备已选好时，保持当前设置即可。",null,UiRole.Muted);grid.Controls.Add(intro,0,0);grid.SetColumnSpan(intro,2);
         var source=Selector(choices,cfg.SourceId,cfg.SourceContainer);source.Name="sourceDevice";
         var left=Selector(choices,cfg.LeftId,cfg.LeftContainer);left.Name="leftDevice";
         var right=Selector(choices,cfg.RightId,cfg.RightContainer);right.Name="rightDevice";
         var normal=Selector(choices,cfg.FallbackId,null);normal.Name="fallbackDevice";
         var boxes=new[]{source,left,right,normal};var labels=new[]{"电脑音频入口","左侧音箱","右侧音箱","备用普通扬声器"};
-        for(int i=0;i<4;i++){grid.Controls.Add(Label(labels[i],null,Ink),0,i+1);boxes[i].Margin=new Padding(0,6,0,0);grid.Controls.Add(boxes[i],1,i+1);}
-        grid.Controls.Add(Label("暂停或退出时，优先恢复启用前的扬声器；原设备不可用时使用此备用扬声器。普通模式只通过一台设备播放。",null,Muted),1,5);
+        for(int i=0;i<4;i++){grid.Controls.Add(Label(labels[i],null,UiRole.Default),0,i+1);boxes[i].Margin=new Padding(0,6,0,0);grid.Controls.Add(boxes[i],1,i+1);}
+        grid.Controls.Add(Label("暂停或退出时，优先恢复启用前的扬声器；原设备不可用时使用此备用扬声器。普通模式只通过一台设备播放。",null,UiRole.Muted),1,5);
         var manage=new CheckBox{Name="manageDefaults",Text="启用时自动切换 Windows 到立体声",Checked=cfg.ManageDefaults,AutoSize=true,Anchor=AnchorStyles.Left};
         grid.Controls.Add(manage,1,6);
         var saveButton=Button("保存设置","saveDevices",true);saveButton.Width=108;saveButton.Anchor=AnchorStyles.Right|AnchorStyles.Bottom;grid.Controls.Add(saveButton,1,7);
@@ -485,7 +519,7 @@ internal sealed class StereoTray : IDisposable {
                 cfg.Validate();save(cfg);form.Close();
             } catch(Exception error){MessageBox.Show(form,error.Message,"检查设备设置");}
         };
-        form.Controls.Add(grid);form.AcceptButton=saveButton;return form;
+        form.Controls.Add(grid);form.AcceptButton=saveButton;UiTheme.Apply(form);return form;
     }
     internal static Form BuildCalibration(Icon logo) {
         var form=NewWindow("音量校准（只读）",logo,new Size(560,682));
@@ -512,9 +546,10 @@ internal sealed class StereoTray : IDisposable {
         layout.Controls.Add(new Label{Name="calibrationHelp",Text="44% 保留机身按键的特殊映射，USB 写入 −29 dB。\r\nWindows 75% 可能在音箱上显示 74%，受硬件档位限制。\r\n\r\n程序无法直接读取音箱 App 的实际百分比，请在 App 中查看。",
             Dock=DockStyle.Fill,Padding=new Padding(0,8,0,0)},0,2);
         var close=Button("关闭",null,false);close.Width=86;close.Anchor=AnchorStyles.Right|AnchorStyles.Bottom;close.DialogResult=DialogResult.OK;
-        layout.Controls.Add(close,0,3);form.Controls.Add(layout);form.AcceptButton=close;form.CancelButton=close;return form;
+        layout.Controls.Add(close,0,3);form.Controls.Add(layout);form.AcceptButton=close;form.CancelButton=close;UiTheme.Apply(form);return form;
     }
     public void Dispose() {
+        SystemEvents.UserPreferenceChanged-=themeChanged;
         timer.Stop();timer.Dispose();
         if(controlWindow!=null)controlWindow.Close();
         if(deviceWindow!=null)deviceWindow.Close();

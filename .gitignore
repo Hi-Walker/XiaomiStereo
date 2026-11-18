@@ -7,3 +7,4 @@ settings.json
 recovery.json
 *.tmp
 .vs/
+ui.json
